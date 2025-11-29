@@ -68,3 +68,4 @@ button:disabled { background-color: #cbd5e1; cursor: not-allowed; }
 .text-sm { font-size: 0.875rem; }
 .text-center { text-align: center; }
 .mt-4 { margin-top: 1rem; }
+h4 {text-align: center}
