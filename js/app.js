@@ -60,7 +60,7 @@ async function handleSearch(e) {
         const userLocation = await smartGeocode(cep, number);
         
         if (!userLocation) {
-            throw new Error('Não foi possível localizar este endereço no mapa. Verifique o número.');
+            throw new Error('Digite novamente o CEP. Não foi possível localizar este endereço no mapa.');
         }
 
         loading.innerHTML = '<small>Buscando escolas próximas...</small>';
