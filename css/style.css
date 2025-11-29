@@ -17,7 +17,7 @@ body { background-color: var(--background); color: var(--text); min-height: 100v
 /* Header */
 header { background: var(--surface); padding: 1rem; box-shadow: var(--shadow); text-align: center; margin-bottom: 2rem; }
 .logo { font-size: 1.5rem; font-weight: 700; color: var(--primary); text-decoration: none; }
-
+h4 {text-align: center; }
 /* Cards & Grid */
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; }
 .card { background: var(--surface); border-radius: var(--radius); padding: 2rem; box-shadow: var(--shadow); }
@@ -68,4 +68,4 @@ button:disabled { background-color: #cbd5e1; cursor: not-allowed; }
 .text-sm { font-size: 0.875rem; }
 .text-center { text-align: center; }
 .mt-4 { margin-top: 1rem; }
-h4 {text-align: center}
+
