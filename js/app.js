@@ -1,14 +1,26 @@
 /**
  * app.js
- * Lógica de busca com Correção de Geolocalização (BrasilAPI + Nominatim)
+ * - Pino Verde Arrastável
+ * - Seleção Exclusiva (Integral OU Parcial)
+ * - Otimização de Rota (OSRM) para evitar queda
  */
 
 let map = null;
-let markers = [];
-let userMarker = null;
+let schoolMarkers = []; 
+let userMarker = null;  
+let currentClassId = null; 
+
+// Configuração do Ícone Verde
+const greenIcon = new L.Icon({
+    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png',
+    shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+    iconSize: [25, 41],
+    iconAnchor: [12, 41],
+    popupAnchor: [1, -34],
+    shadowSize: [41, 41]
+});
 
 function initMap() {
-    // Centraliza inicialmente em SBC
     map = L.map('map').setView([-23.6914, -46.5646], 12);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; OpenStreetMap contributors'
@@ -16,21 +28,22 @@ function initMap() {
 }
 
 async function handleSearch(e) {
-    e.preventDefault();
+    if (e) e.preventDefault();
+    
     const cep = document.getElementById('cep').value.replace(/\D/g, '');
     const number = document.getElementById('number').value;
     const dob = document.getElementById('dob').value;
     const btn = document.getElementById('btnSearch');
     const loading = document.getElementById('loading');
     
-    // Checkboxes
+    // Verificação dos Radios
     const integralChecked = document.getElementById('periodIntegral').checked;
     const parcialChecked = document.getElementById('periodParcial').checked;
 
     if (cep.length !== 8) return alert('CEP inválido. Digite 8 números.');
-    if (!integralChecked && !parcialChecked) return alert('Selecione ao menos um período (Integral ou Parcial).');
+    // Garantia extra, embora o HTML já force um checked
+    if (!integralChecked && !parcialChecked) return alert('Selecione um período.');
 
-    // 1. Determina Classificação
     const classification = determineClassification(dob);
     const classResultDiv = document.getElementById('classificationResult');
     const classNameSpan = document.getElementById('className');
@@ -44,39 +57,23 @@ async function handleSearch(e) {
         return;
     }
 
+    currentClassId = classification.id;
     classResultDiv.classList.remove('hidden');
     classResultDiv.style.background = '#f0f9ff';
     classResultDiv.style.borderColor = '#bae6fd';
     classNameSpan.innerText = classification.name;
     classNameSpan.style.color = '#0284c7';
 
-    // 2. Geolocalização (FIXED)
     btn.disabled = true;
     loading.classList.remove('hidden');
     loading.innerHTML = '<small>Identificando endereço...</small>';
 
     try {
-        // Nova função de geocodificação mais robusta
         const userLocation = await smartGeocode(cep, number);
         
-        if (!userLocation) {
-            throw new Error('Digite novamente o CEP. Não foi possível localizar este endereço no mapa.');
-        }
+        if (!userLocation) throw new Error('Endereço não encontrado.');
 
-        loading.innerHTML = '<small>Buscando escolas próximas...</small>';
-
-        // 3. Buscar Escolas (Top 5 Integral, Top 5 Parcial)
-        const results = {};
-        
-        if (integralChecked) {
-            results.integral = findSchoolsByPeriod(userLocation, classification.id, 'integral');
-        }
-        if (parcialChecked) {
-            results.parcial = findSchoolsByPeriod(userLocation, classification.id, 'parcial');
-        }
-        
-        // 4. Renderizar
-        renderResults(results, userLocation);
+        await updateMapAndResults(userLocation);
 
     } catch (err) {
         alert(err.message);
@@ -87,191 +84,212 @@ async function handleSearch(e) {
     }
 }
 
+async function updateMapAndResults(coords) {
+    const loading = document.getElementById('loading');
+    if (loading) {
+        loading.classList.remove('hidden');
+        loading.innerHTML = '<small>Calculando rotas...</small>';
+    }
+
+    // 1. Gerencia o Marcador do Usuário (Verde)
+    if (!userMarker) {
+        userMarker = L.marker([coords.lat, coords.lon], {
+            icon: greenIcon,
+            draggable: true,
+            title: "Arraste para corrigir"
+        }).addTo(map);
+
+        // Ao arrastar, recalcula
+        userMarker.on('dragend', async function(event) {
+            const position = event.target.getLatLng();
+            await updateMapAndResults({ lat: position.lat, lon: position.lng });
+        });
+        
+        userMarker.bindPopup("<b>Você está aqui</b><br>Arraste o pino verde se necessário.").openPopup();
+    } else {
+        userMarker.setLatLng([coords.lat, coords.lon]);
+        if (!userMarker.isPopupOpen()) {
+            userMarker.setPopupContent("<b>Localização Atualizada</b>").openPopup();
+        }
+    }
+
+    // 2. Limpa mapa anterior
+    schoolMarkers.forEach(m => map.removeLayer(m));
+    schoolMarkers = [];
+
+    // 3. Define qual busca fazer (Integral OU Parcial)
+    const isIntegral = document.getElementById('periodIntegral').checked;
+    
+    const results = {};
+    
+    // Busca OSRM apenas para o tipo selecionado
+    if (isIntegral) {
+        results.integral = await findSchoolsWithOsrm(coords, currentClassId, 'integral');
+    } else {
+        results.parcial = await findSchoolsWithOsrm(coords, currentClassId, 'parcial');
+    }
+
+    renderListAndSchoolMarkers(results);
+
+    const group = new L.featureGroup([userMarker, ...schoolMarkers]);
+    map.fitBounds(group.getBounds().pad(0.1));
+
+    if (loading) loading.classList.add('hidden');
+}
+
+function renderListAndSchoolMarkers(results) {
+    const list = document.getElementById('resultsList');
+    list.innerHTML = '';
+    
+    const addedToMapIds = new Set();
+
+    const renderSection = (title, schools, badgeClass) => {
+        if (!schools || schools.length === 0) return '';
+        
+        const htmlItems = schools.map((s, idx) => {
+            if (!addedToMapIds.has(s.id)) {
+                // Mapa: Mostra nome e endereço no Popup (sem a quilometragem)
+                const marker = L.marker([s.lat, s.lon])
+                    .addTo(map)
+                    .bindPopup(`<b>${s.name}</b><br>${s.address}`);
+                schoolMarkers.push(marker);
+                addedToMapIds.add(s.id);
+            }
+
+            // Lista: Mostra apenas nome e endereço
+            return `<div class="school-item" onclick="focusOnSchool(${s.lat}, ${s.lon})">
+                    <div class="flex" style="justify-content: space-between;">
+                        <h3>${idx + 1}. ${s.name}</h3>
+                        <span class="badge ${badgeClass}">${title}</span>
+                    </div>
+                    <p class="text-sm" style="color: var(--text-light);">${s.address}</p>
+                </div>`;
+        }).join('');
+
+        return `<div class="result-section"><h3 class="section-title">${title} (${schools.length})</h3>${htmlItems}</div>`;
+    };
+
+    let hasRes = false;
+    
+    // Renderiza apenas o bloco correspondente
+    if (results.integral) { 
+        list.innerHTML += renderSection('Período Integral', results.integral, 'badge-integral'); 
+        hasRes = true; 
+    }
+    
+    if (results.parcial) { 
+        list.innerHTML += renderSection('Período Parcial', results.parcial, 'badge-parcial'); 
+        hasRes = true; 
+    }
+
+    if (!hasRes) list.innerHTML = '<p class="text-center">Nenhuma escola encontrada para este período.</p>';
+}
+
+// --- LÓGICA OSRM SEGURA ---
+
+async function findSchoolsWithOsrm(userCoords, classId, type) {
+    const allSchools = Storage.getSchools();
+    const eligible = allSchools.filter(s => s.offerings && s.offerings.some(o => o.id === classId && o.type === type));
+
+    // 1. Filtro rápido por Linha Reta
+    const tempWithDist = eligible.map(s => ({ 
+        ...s, 
+        tempDist: getDistanceFromLatLonInKm(userCoords.lat, userCoords.lon, s.lat, s.lon) 
+    }));
+
+    // 2. Pega apenas as 3 mais próximas para consultar a rota
+    tempWithDist.sort((a, b) => a.tempDist - b.tempDist);
+    const topCandidates = tempWithDist.slice(0, 3); 
+
+    // 3. Consulta API OSRM
+    const finalSchools = await Promise.all(topCandidates.map(async (s) => {
+        const realDist = await getOsrmRouteDistance(userCoords, { lat: s.lat, lon: s.lon });
+        
+        // Se API funcionar, usa rota. Se falhar, usa linha reta.
+        if (realDist !== null) {
+            return { ...s, distance: realDist, isRoute: true };
+        } else {
+            return { ...s, distance: s.tempDist, isRoute: false };
+        }
+    }));
+
+    // Reordena final
+    finalSchools.sort((a, b) => a.distance - b.distance);
+    return finalSchools;
+}
+
+// Timeout de 10 segundos para espera
+async function getOsrmRouteDistance(start, end) {
+    const url = `https://router.project-osrm.org/route/v1/driving/${start.lon},${start.lat};${end.lon},${end.lat}?overview=false`;
+    
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s
+
+        const res = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        if (!res.ok) return null;
+        
+        const data = await res.json();
+        if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
+            return data.routes[0].distance / 1000;
+        }
+        return null;
+    } catch (e) {
+        return null;
+    }
+}
+
+// --- Helpers ---
+
 function determineClassification(dobStr) {
     const dob = new Date(dobStr);
     const classifications = Storage.getClassifications();
     return classifications.find(c => {
         const start = new Date(c.start);
         const end = new Date(c.end);
-        start.setHours(0,0,0,0);
-        end.setHours(0,0,0,0);
-        dob.setHours(0,0,0,0);
+        start.setHours(0,0,0,0); end.setHours(0,0,0,0); dob.setHours(0,0,0,0);
         return dob >= start && dob <= end;
     });
 }
 
-/**
- * smartGeocode
- * 1. Busca o nome da rua via BrasilAPI (muito mais preciso que o OSM para CEPs).
- * 2. Envia "Rua + Número" para o Nominatim para pegar a lat/lon exata.
- */
 async function smartGeocode(cep, number) {
     let streetName = '';
-    let neighborhood = '';
-
-    // Passo 1: Converter CEP em Rua (BrasilAPI)
     try {
         const cepRes = await fetch(`https://brasilapi.com.br/api/cep/v2/${cep}`);
         if (cepRes.ok) {
             const cepData = await cepRes.json();
-            streetName = cepData.street; // Ex: Rua MMDC
-            neighborhood = cepData.neighborhood;
+            streetName = cepData.street;
         }
-    } catch (e) {
-        console.warn('BrasilAPI falhou ou offline, tentando fallback direto...');
-    }
+    } catch (e) {}
 
-    // Passo 2: Construir a query para o Nominatim
-    // Se achou o nome da rua, busca por: "Rua X, 123, São Bernardo do Campo"
-    // Se não achou, tenta pelo CEP mesmo (fallback menos preciso)
-    let query = '';
-    if (streetName) {
-        query = `${streetName}, ${number}, São Bernardo do Campo, Brazil`;
-    } else {
-        query = `${number}, ${cep}, São Bernardo do Campo, Brazil`;
-    }
-
-    // Passo 3: Buscar Lat/Lon no OpenStreetMap (Nominatim)
-    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1&addressdetails=1`;
+    let query = streetName ? `${streetName}, ${number}, São Bernardo do Campo, Brazil` : `${number}, ${cep}, São Bernardo do Campo, Brazil`;
+    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`;
     
     try {
         const res = await fetch(url);
         const data = await res.json();
+        if (data && data.length > 0) return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon), display_name: streetName || data[0].display_name };
         
-        if (data && data.length > 0) {
-            return {
-                lat: parseFloat(data[0].lat),
-                lon: parseFloat(data[0].lon),
-                display_name: streetName ? `${streetName}, ${number}` : data[0].display_name
-            };
-        }
-        
-        // Tentativa desesperada: Se falhar com número, tenta buscar só a rua (centro da rua)
         if (streetName) {
-            const fallbackUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(`${streetName}, São Bernardo do Campo`)}&limit=1`;
-            const res2 = await fetch(fallbackUrl);
-            const data2 = await res2.json();
-            if (data2 && data2.length > 0) {
-                return { lat: parseFloat(data2[0].lat), lon: parseFloat(data2[0].lon), display_name: streetName };
-            }
+            const fallbackRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(streetName + ", São Bernardo do Campo")}&limit=1`);
+            const fallbackData = await fallbackRes.json();
+            if (fallbackData && fallbackData.length > 0) return { lat: parseFloat(fallbackData[0].lat), lon: parseFloat(fallbackData[0].lon), display_name: streetName };
         }
-
         return null;
-    } catch (e) {
-        console.error(e);
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
-function findSchoolsByPeriod(userCoords, classId, type) {
-    const allSchools = Storage.getSchools();
-    
-    // Filtro: Escola deve ter a classificação E o tipo (integral/parcial)
-    const eligible = allSchools.filter(s => {
-        if (!s.offerings) return false;
-        return s.offerings.some(o => o.id === classId && o.type === type);
-    });
-
-    // Calcular Distância
-    const withDist = eligible.map(s => {
-        return { 
-            ...s, 
-            distance: getDistanceFromLatLonInKm(userCoords.lat, userCoords.lon, s.lat, s.lon) 
-        };
-    });
-
-    // Ordenar (Menor distância primeiro)
-    withDist.sort((a, b) => a.distance - b.distance);
-
-    // Retornar Top 5
-    return withDist.slice(0, 5);
-}
-
-function renderResults(results, userCoords) {
-    const list = document.getElementById('resultsList');
-    list.innerHTML = '';
-
-    // Limpar marcadores antigos
-    markers.forEach(m => map.removeLayer(m));
-    markers = [];
-    if (userMarker) map.removeLayer(userMarker);
-
-    // Adicionar marcador do Usuário
-    userMarker = L.marker([userCoords.lat, userCoords.lon])
-        .addTo(map)
-        .bindPopup(`<b>Sua Localização</b><br>${userCoords.display_name}`)
-        .openPopup();
-
-    let hasResults = false;
-    const addedToMapIds = new Set(); 
-
-    // Helper de renderização
-    const renderSection = (title, schools, badgeClass) => {
-        if (!schools || schools.length === 0) return '';
-        hasResults = true;
-        
-        const htmlItems = schools.map((s, idx) => {
-            if (!addedToMapIds.has(s.id)) {
-                const marker = L.marker([s.lat, s.lon]).addTo(map)
-                    .bindPopup(`<b>${s.name}</b><br>${s.address}`);
-                markers.push(marker);
-                addedToMapIds.add(s.id);
-            }
-
-            return `
-                <div class="school-item" onclick="focusOnSchool(${s.lat}, ${s.lon})">
-                    <div class="flex" style="justify-content: space-between;">
-                        <h3>${idx + 1}. ${s.name}</h3>
-                        <span class="badge ${badgeClass}">${title}</span>
-                    </div>
-                    <p class="text-sm" style="color: var(--text-light);">${s.address}</p>
-                </div>
-            `;
-        }).join('');
-
-        return `
-            <div class="result-section">
-                <h3 class="section-title">${title} (${schools.length})</h3>
-                ${htmlItems}
-            </div>
-        `;
-    };
-
-    if (results.integral) {
-        list.innerHTML += renderSection('Período Integral', results.integral, 'badge-integral');
-    }
-    
-    if (results.integral && results.integral.length > 0 && results.parcial && results.parcial.length > 0) {
-        list.innerHTML += '<hr style="margin: 1.5rem 0; border: 0; border-top: 1px solid #e2e8f0;">';
-    }
-
-    if (results.parcial) {
-        list.innerHTML += renderSection('Período Parcial', results.parcial, 'badge-parcial');
-    }
-
-    if (!hasResults) {
-        list.innerHTML = '<p class="text-center">Nenhuma escola encontrada para os critérios selecionados.</p>';
-    }
-
-    // Ajustar zoom para mostrar tudo
-    const group = new L.featureGroup([userMarker, ...markers]);
-    map.fitBounds(group.getBounds().pad(0.1));
-}
-
-function focusOnSchool(lat, lon) {
-    map.setView([lat, lon], 16);
-}
-
+function focusOnSchool(lat, lon) { map.setView([lat, lon], 16); }
 function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
     const R = 6371; 
     const dLat = deg2rad(lat2 - lat1);
     const dLon = deg2rad(lon2 - lon1);
-    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-              Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) * Math.sin(dLon/2) * Math.sin(dLon/2); 
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) * Math.sin(dLon/2) * Math.sin(dLon/2); 
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); 
     return R * c;
 }
-
 function deg2rad(deg) { return deg * (Math.PI/180); }
 
 initMap();
