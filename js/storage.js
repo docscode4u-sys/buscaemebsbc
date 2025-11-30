@@ -20,17 +20,16 @@ const SEED_DATA = {
     SCHOOLS: [
         {
             id: 's1',
-            name: 'EMEB Arlindo Miguel Teixeira',
-            address: 'Estrada dos Alvarengas, 7500 - Assunção',
-            lat: -23.7450096,
-            lon: -46.6150168,
+            name: 'Afonso Monteiro da Cruz - EMEB',
+            address: 'Rua Valdomiro Luiz, 175 - Bairro Demarchi - CEP: 09820-340 - Tel 1: 4347-7586 - E-mail: afonso.cruz@saobernardo.sp.gov.br',
+            lat: -23.7438063,
+            lon: -46.5682826,
             // Cada objeto define: Classificação atendida + Tipo (Integral/Parcial)
             offerings: [
-                { id: 'c1', type: 'integral' }, { id: 'c1', type: 'parcial' },
-                { id: 'c2', type: 'integral' },
-                { id: 'c3', type: 'integral' }, { id: 'c3', type: 'parcial' },
-                { id: 'c4', type: 'parcial' },
-                { id: 'c5', type: 'parcial' }
+                { id: 'c1', type: 'parcial' }, 
+                { id: 'c2', type: 'parcial' },
+                { id: 'c3', type: 'parcial' }, 
+                { id: 'c4', type: 'parcial' },                
             ]
         },
         {
